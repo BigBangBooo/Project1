@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -e
+python -m src.data_generator --out data/simulated.csv --n_steps 3000 --n_series 3
+python -m src.preprocessing --in data/simulated.csv --out data/preprocessed.npz
+python -m src.train --config configs/default.yaml
+python -m src.evaluate --checkpoint models/best.pt --config configs/default.yaml
+python -m src.visualize --checkpoint models/best.pt --config configs/default.yaml --out figs/
+echo "Experiment finished. Check figs/ and models/"

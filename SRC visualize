@@ -1,41 +1,51 @@
 # src/visualize.py
-import torch
 import numpy as np
+import torch
 import matplotlib.pyplot as plt
-import argparse
 from pathlib import Path
 from src.model import TimeSeriesTransformer
 from src.dataset import TimeSeriesDataset
+import yaml
 
-def plot_attention_sample(encodings, out_path):
-    # encodings: (L, d_model) or (batch, L, d_model)
-    if encodings.ndim == 3:
-        enc = encodings[0]
-    else:
-        enc = encodings
-    # compute self-similarity as proxy for attention: dot product between time steps
-    sim = enc @ enc.T  # (L, L)
-    plt.figure(figsize=(6,5))
-    plt.imshow(sim, aspect='auto', origin='lower')
-    plt.colorbar()
-    plt.title("Encoder self-similarity (proxy for attention)")
+def plot_attention_matrix(attn, out_path, title="Attention"):
+    # attn: (H, L) or (batch, H, L) or (batch, H, L) averaged over batch/head
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.figure(figsize=(8,6))
+    plt.imshow(attn, aspect='auto', origin='lower')
+    plt.colorbar()
+    plt.xlabel("Encoder time steps (L)")
+    plt.ylabel("Decoder time steps (H)")
+    plt.title(title)
+    plt.tight_layout()
     plt.savefig(out_path, dpi=150)
     plt.close()
 
-def main(checkpoint, data, config, out="figs/attention.png"):
-    import yaml
+def plot_forecast_vs_true(true, pred, out_path, series_idx=0):
+    # true, pred: (H, D)
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.figure(figsize=(8,4))
+    plt.plot(true[:, series_idx], label='True')
+    plt.plot(pred[:, series_idx], label='Pred')
+    plt.legend()
+    plt.title(f"Forecast vs True (series {series_idx})")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+
+def main(checkpoint, data_npz="data/preprocessed.npz", config="configs/default.yaml", out_dir="figs/"):
     cfg = yaml.safe_load(open(config))
-    obj = np.load(data, allow_pickle=True)
+    obj = np.load(data_npz, allow_pickle=True)
     values = obj['values']
-    test = values[int(values.shape[0]*0.85):]
+    T = values.shape[0]
+    test = values[int(T*0.85):]
     ds = TimeSeriesDataset(test, input_len=cfg['model']['L'], target_len=cfg['model']['H'])
-    x,_ = ds[0]
+    x, y = ds[0]  # first test sample: x (L,D), y (H,D)
     model = TimeSeriesTransformer(
+        input_dim=values.shape[1],
         d_model=cfg['model']['d_model'],
         nhead=cfg['model']['nhead'],
-        num_layers=cfg['model']['num_layers'],
-        input_dim=values.shape[1],
+        num_encoder_layers=cfg['model']['num_encoder_layers'],
+        num_decoder_layers=cfg['model']['num_decoder_layers'],
         dim_feedforward=cfg['model'].get('dim_feedforward',128),
         target_len=cfg['model']['H']
     )
@@ -43,16 +53,25 @@ def main(checkpoint, data, config, out="figs/attention.png"):
     model.eval()
     with torch.no_grad():
         inp = torch.from_numpy(x[None].astype('float32'))
-        _, enc = model(inp)
-        enc = enc.numpy()[0]  # (L, d_model)
-    plot_attention_sample(enc, out)
-    print("Saved attention proxy figure to", out)
+        # Optionally supply decoder input = zeros; model uses that
+        preds, attn = model(inp)
+        preds = preds[0].numpy()  # (H, D)
+
+    # pick decoder cross-attention from last decoder layer
+    dec_cross_last = attn['dec_cross'][-1]  # (batch, H, L)
+    # average across batch (and optionally across heads if already averaged)
+    dec_cross_avg = dec_cross_last.mean(axis=0)  # (H, L)
+
+    plot_attention_matrix(dec_cross_avg, out_dir + "decoder_cross_attn.png", title="Decoder cross-attention (avg over batch)")
+    plot_forecast_vs_true(y, preds, out_dir + "forecast_vs_true_series0.png", series_idx=0)
+    print("Saved attention and forecast figures to", out_dir)
 
 if __name__ == "__main__":
+    import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--data", default="data/preprocessed.npz")
     parser.add_argument("--config", default="configs/default.yaml")
-    parser.add_argument("--out", default="figs/attention.png")
+    parser.add_argument("--out", default="figs/")
     args = parser.parse_args()
     main(args.checkpoint, args.data, args.config, args.out)

@@ -1,0 +1,3 @@
+python -m src.data_generator --out data/simulated.csv
+python -m src.preprocessing --in data/simulated.csv --out data/preprocessed.npz
+

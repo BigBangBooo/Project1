@@ -1,0 +1,17 @@
+src/
+  data_generator.py   – synthetic multivariate dataset
+  preprocessing.py    – imputation, scaling, windowing
+  dataset.py          – PyTorch Dataset for seq2seq windows
+  model.py            – full Transformer (encoder + decoder)
+  train.py            – training pipeline + checkpointing
+  evaluate.py         – baselines + metrics
+  visualize.py        – attention heatmaps + forecast plots
+
+configs/
+  default.yaml        – hyperparameters and settings
+
+docs/
+  report_template.md  – final written report template
+
+figs/                 – generated plots
+models/               – saved checkpoints

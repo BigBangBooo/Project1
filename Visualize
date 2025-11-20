@@ -1,0 +1,42 @@
+(If you prefer TensorFlow, I can provide TF equivalents — say so.)
+
+---
+
+## `src/data_generator.py`
+```python
+# src/data_generator.py
+import numpy as np
+import pandas as pd
+import argparse
+from pathlib import Path
+
+def generate_multivariate_time_series(n_steps=5000, n_series=3, seed=42):
+    rng = np.random.RandomState(seed)
+    t = np.arange(n_steps)
+    data = []
+    for i in range(n_series):
+        # seasonal + trend + noise + small coupling between series
+        season = 10 * np.sin(2 * np.pi * t / (50 + 10*i))
+        trend = 0.001 * t * (1 + 0.1*i)
+        noise = rng.normal(scale=1.0 + 0.1*i, size=n_steps)
+        base = season + trend + noise
+        data.append(base)
+    data = np.vstack(data).T  # shape (n_steps, n_series)
+    # add simple cross-dependency
+    data[:,1] += 0.3 * data[:,0]
+    data[:,2] += 0.2 * data[:,1]
+    return pd.DataFrame(data, columns=[f"x{i+1}" for i in range(n_series)], index=pd.date_range('2000-01-01', periods=n_steps))
+
+def main(out_path="data/simulated.csv", n_steps=5000, n_series=3):
+    df = generate_multivariate_time_series(n_steps=n_steps, n_series=n_series)
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_path, index_label="timestamp")
+    print(f"Saved simulated data to {out_path}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--out", dest="out_path", default="data/simulated.csv")
+    parser.add_argument("--n_steps", type=int, default=2000)
+    parser.add_argument("--n_series", type=int, default=3)
+    args = parser.parse_args()
+    main(args.out_path, args.n_steps, args.n_series)

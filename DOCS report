@@ -1,0 +1,28 @@
+# Report — Transformer Time Series Forecasting
+
+## 1. Abstract
+(1–2 paragraphs summarizing goals and results)
+
+## 2. Data
+- Source / generation method
+- Variables and time index
+- Preprocessing choices (imputation, scaling, window sizes L and H)
+
+## 3. Model
+- Architecture description
+- Key hyperparameters
+
+## 4. Training
+- Training loop details
+- Optimization / scheduler / batch size
+- Hyperparameter tuning strategy
+
+## 5. Baseline and Metrics
+- Baseline model description
+- MAE, RMSE, MAPE comparisons
+
+## 6. Attention & Interpretability
+- Visualizations and interpretations of attention (what the model focused on)
+- Example time segments where attention helped/hurt
+
+## 7. Conclusion & Future Work

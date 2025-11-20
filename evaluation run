@@ -1,0 +1,1 @@
+python -m src.evaluate --checkpoint models/best.pt --config configs/default.yaml

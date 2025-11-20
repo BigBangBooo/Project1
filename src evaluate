@@ -1,20 +1,28 @@
 # src/evaluate.py
 import numpy as np
 import torch
+import yaml
 from pathlib import Path
-import argparse
 from sklearn.metrics import mean_absolute_error, mean_squared_error
-
 from src.dataset import TimeSeriesDataset
 from src.model import TimeSeriesTransformer
+import warnings
 
-def load_model(checkpoint_path, input_dim, cfg):
-    state = torch.load(checkpoint_path, map_location='cpu')
+def metrics(true, pred):
+    mae = mean_absolute_error(true.ravel(), pred.ravel())
+    rmse = mean_squared_error(true.ravel(), pred.ravel(), squared=False)
+    mape = np.mean(np.abs((true - pred) / (np.abs(true) + 1e-8))) * 100.0
+    return {"MAE": mae, "RMSE": rmse, "MAPE": mape}
+
+def load_model_state(checkpoint, config, input_dim):
+    state = torch.load(checkpoint, map_location='cpu')
+    cfg = config
     model = TimeSeriesTransformer(
+        input_dim=input_dim,
         d_model=cfg['model']['d_model'],
         nhead=cfg['model']['nhead'],
-        num_layers=cfg['model']['num_layers'],
-        input_dim=input_dim,
+        num_encoder_layers=cfg['model'].get('num_encoder_layers', cfg['model'].get('num_layers', 3)),
+        num_decoder_layers=cfg['model'].get('num_decoder_layers', cfg['model'].get('num_layers', 3)),
         dim_feedforward=cfg['model'].get('dim_feedforward',128),
         target_len=cfg['model']['H']
     )
@@ -22,37 +30,95 @@ def load_model(checkpoint_path, input_dim, cfg):
     model.eval()
     return model
 
-def metrics(true, pred):
-    # flatten across samples/time/vars
-    mae = mean_absolute_error(true.ravel(), pred.ravel())
-    rmse = mean_squared_error(true.ravel(), pred.ravel(), squared=False)
-    mape = np.mean(np.abs((true - pred) / (true + 1e-8))) * 100.0
-    return {"MAE": mae, "RMSE": rmse, "MAPE": mape}
+def naive_baseline_forecast(test_values, L, H):
+    # For each sliding window in test, naive = last observed vector repeated H times
+    T = test_values.shape[0]
+    preds = []
+    trues = []
+    for start in range(0, T - L - H + 1):
+        x = test_values[start:start+L]
+        y = test_values[start+L:start+L+H]
+        last = x[-1][None,:]  # (1,D)
+        pred = np.repeat(last, H, axis=0)  # (H,D)
+        preds.append(pred)
+        trues.append(y)
+    return np.stack(trues), np.stack(preds)
 
-def main(checkpoint, data_npz, cfg_path):
-    import yaml
-    cfg = yaml.safe_load(open(cfg_path))
-    obj = np.load(data_npz, allow_pickle=True)
-    values = obj['values']
-    T = values.shape[0]
-    test = values[int(T*0.85):]
-    ds = TimeSeriesDataset(test, input_len=cfg['model']['L'], target_len=cfg['model']['H'])
+def auto_arima_baseline_forecast(test_values, L, H):
+    # This is optional: use pmdarima auto_arima to forecast each target series separately.
+    try:
+        import pmdarima as pm
+    except Exception as e:
+        warnings.warn("pmdarima not installed; skipping Auto-ARIMA baseline. Install with `pip install pmdarima`")
+        return None, None
+
+    T, D = test_values.shape
+    trues = []
+    preds = []
+    for start in range(0, T - L - H + 1):
+        x = test_values[start:start+L]
+        y = test_values[start+L:start+L+H]
+        # fit per-series ARIMA on the L historical points and forecast H
+        per_series_preds = []
+        for d in range(D):
+            series = x[:, d]
+            try:
+                m = pm.auto_arima(series, suppress_warnings=True, error_action='ignore', seasonal=False)
+                f = m.predict(n_periods=H)
+            except Exception:
+                # fallback to naive per-series
+                f = np.repeat(series[-1], H)
+            per_series_preds.append(f)
+        per_series_preds = np.stack(per_series_preds, axis=1)  # (H,D)
+        preds.append(per_series_preds)
+        trues.append(y)
+    return np.stack(trues), np.stack(preds)
+
+def model_forecast_all(model, test_values, L, H, batch_size=64):
+    ds = TimeSeriesDataset(test_values, input_len=L, target_len=H)
     inputs = []
     trues = []
     for x,y in ds:
         inputs.append(x)
         trues.append(y)
-    inputs = np.stack(inputs)
-    trues = np.stack(trues)
-    model = load_model(checkpoint, input_dim=values.shape[1], cfg=cfg)
+    inputs = np.stack(inputs)  # (N, L, D)
+    trues = np.stack(trues)    # (N, H, D)
     with torch.no_grad():
         import torch as th
-        inp = th.from_numpy(inputs)
-        preds, _ = model(inp.float())
+        inp = th.from_numpy(inputs.astype('float32'))
+        preds, _ = model(inp)
         preds = preds.numpy()
-    print(metrics(trues, preds))
+    return trues, preds
+
+def main(checkpoint, data_npz="data/preprocessed.npz", config_path="configs/default.yaml"):
+    cfg = yaml.safe_load(open(config_path))
+    obj = np.load(data_npz, allow_pickle=True)
+    values = obj['values']
+    T = values.shape[0]
+    test = values[int(T*0.85):]
+    L = cfg['model']['L']
+    H = cfg['model']['H']
+
+    model = load_model_state(checkpoint, cfg, input_dim=values.shape[1])
+
+    print("Running model forecasts...")
+    trues_model, preds_model = model_forecast_all(model, test, L, H)
+
+    print("Running naive baseline...")
+    trues_naive, preds_naive = naive_baseline_forecast(test, L, H)
+
+    print("Metrics (model):", metrics(trues_model, preds_model))
+    print("Metrics (naive baseline):", metrics(trues_naive, preds_naive))
+
+    # optional: auto-arima baseline
+    trues_auto, preds_auto = auto_arima_baseline_forecast(test, L, H)
+    if trues_auto is not None:
+        print("Metrics (Auto-ARIMA):", metrics(trues_auto, preds_auto))
+    else:
+        print("Auto-ARIMA baseline skipped (pmdarima not installed).")
 
 if __name__ == "__main__":
+    import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--data", default="data/preprocessed.npz")

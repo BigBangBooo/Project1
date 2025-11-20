@@ -1,30 +1,115 @@
 # src/model.py
 import torch
 from torch import nn
+from typing import Dict, List, Tuple
+
+class EncoderLayer(nn.Module):
+    def __init__(self, d_model=64, nhead=4, dim_feedforward=128, dropout=0.1):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=nhead, dropout=dropout, batch_first=True)
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.activation = nn.ReLU()
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None):
+        # src: (batch, L, d_model)
+        attn_out, attn_w = self.self_attn(src, src, src, attn_mask=src_mask,
+                                          key_padding_mask=src_key_padding_mask, need_weights=True)
+        src = src + self.dropout(attn_out)
+        src = self.norm1(src)
+        ff = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout(ff)
+        src = self.norm2(src)
+        # attn_w: (batch, L, L)
+        return src, attn_w
+
+class DecoderLayer(nn.Module):
+    def __init__(self, d_model=64, nhead=4, dim_feedforward=128, dropout=0.1):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=nhead, dropout=dropout, batch_first=True)
+        self.cross_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=nhead, dropout=dropout, batch_first=True)
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.norm3 = nn.LayerNorm(d_model)
+        self.activation = nn.ReLU()
+
+    def forward(self, tgt, memory, tgt_mask=None, memory_mask=None,
+                tgt_key_padding_mask=None, memory_key_padding_mask=None):
+        # tgt: (batch, H, d_model); memory: (batch, L, d_model)
+        attn_self_out, attn_self_w = self.self_attn(tgt, tgt, tgt, attn_mask=tgt_mask,
+                                                   key_padding_mask=tgt_key_padding_mask, need_weights=True)
+        tgt = tgt + self.dropout(attn_self_out)
+        tgt = self.norm1(tgt)
+
+        attn_cross_out, attn_cross_w = self.cross_attn(tgt, memory, memory, attn_mask=memory_mask,
+                                                       key_padding_mask=memory_key_padding_mask, need_weights=True)
+        tgt = tgt + self.dropout(attn_cross_out)
+        tgt = self.norm2(tgt)
+
+        ff = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
+        tgt = tgt + self.dropout(ff)
+        tgt = self.norm3(tgt)
+        # attn_self_w: (batch, H, H); attn_cross_w: (batch, H, L)
+        return tgt, attn_self_w, attn_cross_w
 
 class TimeSeriesTransformer(nn.Module):
-    def __init__(self, d_model=64, nhead=4, num_layers=3, input_dim=3, dropout=0.1, dim_feedforward=128, target_len=24):
+    """
+    Sequence-to-sequence Transformer with explicit attention weight return.
+    Inputs:
+      - x: (batch, L, D)  input multivariate series
+      - decoder_input: (batch, H, D) optional (use zeros or teacher forcing)
+    Returns:
+      - preds: (batch, H, D)
+      - attn_dict: dict with attention weights lists for plotting
+          {'enc_self': [tensor per layer], 'dec_self': [...], 'dec_cross': [...]}
+    """
+    def __init__(self, input_dim=3, d_model=64, nhead=4, num_encoder_layers=3, num_decoder_layers=3,
+                 dim_feedforward=128, dropout=0.1, target_len=24):
         super().__init__()
         self.input_proj = nn.Linear(input_dim, d_model)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward, dropout=dropout, batch_first=True)
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        # decoder: simple autoregressive linear head that attends to encoded sequence via cross-attention can be added,
-        # but for simplicity we project encoder outputs to forecast horizon using a pooling + MLP.
-        self.pool = nn.AdaptiveAvgPool1d(1)
-        self.fc = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.ReLU(),
-            nn.Linear(d_model, input_dim * target_len)
-        )
+        self.output_proj = nn.Linear(d_model, input_dim)
+        self.encoder_layers = nn.ModuleList([EncoderLayer(d_model, nhead, dim_feedforward, dropout) for _ in range(num_encoder_layers)])
+        self.decoder_layers = nn.ModuleList([DecoderLayer(d_model, nhead, dim_feedforward, dropout) for _ in range(num_decoder_layers)])
+        self.d_model = d_model
         self.target_len = target_len
         self.input_dim = input_dim
 
-    def forward(self, x):
+    def forward(self, x, decoder_input=None):
         # x: (batch, L, D)
-        x = self.input_proj(x)  # -> (batch, L, d_model)
-        enc = self.encoder(x)   # (batch, L, d_model)
-        # produce a single vector per sample via mean over time
-        v = enc.mean(dim=1)     # (batch, d_model)
-        out = self.fc(v)        # (batch, input_dim*H)
-        out = out.view(-1, self.target_len, self.input_dim)  # (batch, H, D)
-        return out, enc  # return encoder outputs too (for attention analysis if needed)
+        batch = x.size(0)
+        enc = self.input_proj(x) * (self.d_model ** 0.5)  # (batch, L, d_model)
+        enc_self_attns = []
+        for layer in self.encoder_layers:
+            enc, attn_w = layer(enc)
+            enc_self_attns.append(attn_w)  # each (batch, L, L)
+
+        # Prepare decoder input tokens:
+        if decoder_input is None:
+            # use zeros (model learns positions from memory)
+            dec_in = torch.zeros((batch, self.target_len, self.d_model), device=x.device)
+        else:
+            dec_in = self.input_proj(decoder_input) * (self.d_model ** 0.5)
+
+        dec = dec_in
+        dec_self_attns = []
+        dec_cross_attns = []
+        for layer in self.decoder_layers:
+            dec, attn_self_w, attn_cross_w = layer(dec, enc)
+            dec_self_attns.append(attn_self_w)   # each (batch, H, H)
+            dec_cross_attns.append(attn_cross_w) # each (batch, H, L)
+
+        # final projection to D dims
+        out = self.output_proj(dec)  # (batch, H, D)
+
+        attn_dict = {
+            'enc_self': enc_self_attns,
+            'dec_self': dec_self_attns,
+            'dec_cross': dec_cross_attns
+        }
+        return out, attn_dict

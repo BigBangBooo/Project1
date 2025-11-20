@@ -1,0 +1,30 @@
+# src/model.py
+import torch
+from torch import nn
+
+class TimeSeriesTransformer(nn.Module):
+    def __init__(self, d_model=64, nhead=4, num_layers=3, input_dim=3, dropout=0.1, dim_feedforward=128, target_len=24):
+        super().__init__()
+        self.input_proj = nn.Linear(input_dim, d_model)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward, dropout=dropout, batch_first=True)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        # decoder: simple autoregressive linear head that attends to encoded sequence via cross-attention can be added,
+        # but for simplicity we project encoder outputs to forecast horizon using a pooling + MLP.
+        self.pool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, input_dim * target_len)
+        )
+        self.target_len = target_len
+        self.input_dim = input_dim
+
+    def forward(self, x):
+        # x: (batch, L, D)
+        x = self.input_proj(x)  # -> (batch, L, d_model)
+        enc = self.encoder(x)   # (batch, L, d_model)
+        # produce a single vector per sample via mean over time
+        v = enc.mean(dim=1)     # (batch, d_model)
+        out = self.fc(v)        # (batch, input_dim*H)
+        out = out.view(-1, self.target_len, self.input_dim)  # (batch, H, D)
+        return out, enc  # return encoder outputs too (for attention analysis if needed)

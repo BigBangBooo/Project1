@@ -1,0 +1,61 @@
+# src/evaluate.py
+import numpy as np
+import torch
+from pathlib import Path
+import argparse
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+from src.dataset import TimeSeriesDataset
+from src.model import TimeSeriesTransformer
+
+def load_model(checkpoint_path, input_dim, cfg):
+    state = torch.load(checkpoint_path, map_location='cpu')
+    model = TimeSeriesTransformer(
+        d_model=cfg['model']['d_model'],
+        nhead=cfg['model']['nhead'],
+        num_layers=cfg['model']['num_layers'],
+        input_dim=input_dim,
+        dim_feedforward=cfg['model'].get('dim_feedforward',128),
+        target_len=cfg['model']['H']
+    )
+    model.load_state_dict(state['model_state'])
+    model.eval()
+    return model
+
+def metrics(true, pred):
+    # flatten across samples/time/vars
+    mae = mean_absolute_error(true.ravel(), pred.ravel())
+    rmse = mean_squared_error(true.ravel(), pred.ravel(), squared=False)
+    mape = np.mean(np.abs((true - pred) / (true + 1e-8))) * 100.0
+    return {"MAE": mae, "RMSE": rmse, "MAPE": mape}
+
+def main(checkpoint, data_npz, cfg_path):
+    import yaml
+    cfg = yaml.safe_load(open(cfg_path))
+    obj = np.load(data_npz, allow_pickle=True)
+    values = obj['values']
+    T = values.shape[0]
+    test = values[int(T*0.85):]
+    ds = TimeSeriesDataset(test, input_len=cfg['model']['L'], target_len=cfg['model']['H'])
+    inputs = []
+    trues = []
+    for x,y in ds:
+        inputs.append(x)
+        trues.append(y)
+    inputs = np.stack(inputs)
+    trues = np.stack(trues)
+    model = load_model(checkpoint, input_dim=values.shape[1], cfg=cfg)
+    with torch.no_grad():
+        import torch as th
+        inp = th.from_numpy(inputs)
+        preds, _ = model(inp.float())
+        preds = preds.numpy()
+    print(metrics(trues, preds))
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--data", default="data/preprocessed.npz")
+    parser.add_argument("--config", default="configs/default.yaml")
+    args = parser.parse_args()
+    main(args.checkpoint, args.data, args.config)

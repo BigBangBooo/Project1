@@ -1,0 +1,30 @@
+# src/preprocessing.py
+import numpy as np
+import pandas as pd
+from pathlib import Path
+import argparse
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
+
+def preprocess_csv(in_path, out_path, fill_method="linear", scale=True):
+    df = pd.read_csv(in_path, index_col=0, parse_dates=True)
+    # simple missing values: forward/backfill if any, otherwise mean
+    if fill_method == "linear":
+        df = df.interpolate().ffill().bfill()
+    else:
+        imp = SimpleImputer(strategy="mean")
+        df[:] = imp.fit_transform(df)
+    scaler = None
+    if scale:
+        scaler = StandardScaler()
+        df[df.columns] = scaler.fit_transform(df)
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    np.savez(out_path, values=df.values.astype(np.float32), columns=np.array(df.columns), index=np.array(df.index.astype(str)))
+    print(f"Saved preprocessed data to {out_path}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--in", dest="in_path", required=True)
+    parser.add_argument("--out", dest="out_path", default="data/preprocessed.npz")
+    args = parser.parse_args()
+    preprocess_csv(args.in_path, args.out_path)

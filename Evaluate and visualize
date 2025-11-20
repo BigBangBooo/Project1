@@ -1,0 +1,2 @@
+python -m src.evaluate --checkpoint models/best.pt
+python -m src.visualize --checkpoint models/best.pt --out figs/attention.png

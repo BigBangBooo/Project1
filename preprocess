@@ -1,0 +1,1 @@
+python -m src.preprocessing --in data/simulated.csv --out data/preprocessed.npz
